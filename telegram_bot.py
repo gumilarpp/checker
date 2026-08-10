@@ -1,0 +1,931 @@
+import copy
+import json
+import logging
+import os
+import random
+import threading
+import time
+from datetime import datetime, timezone, timedelta
+
+import flask
+import requests
+from urllib3.exceptions import InsecureRequestWarning
+
+from main import (
+    extract_netflix_cookie_bundles,
+    cookies_dict_from_netscape,
+    has_required_netflix_cookies,
+    get_account_page,
+    extract_info,
+    is_subscribed_account,
+    is_on_hold_account,
+    derive_plan_info,
+    create_nftoken,
+    build_nftoken_links,
+    has_usable_nftoken,
+    decode_netflix_value,
+    move_cookie_with_reason,
+    cookies_folder,
+    failed_folder,
+    broken_folder,
+)
+
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+API_BASE = "https://api.telegram.org/bot"
+RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+REQUEST_TIMEOUT = 15
+NFTOKEN_RETRY_ATTEMPTS = 1
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+
+app = flask.Flask(__name__)
+
+user_lang = {}
+cooldowns = {}
+awaiting_cookie = set()
+awaiting_admin_password = set()
+awaiting_broadcast = set()
+admins = set()
+ADMIN_PASSWORD = "1509"
+COOLDOWN_SECONDS = 600
+INDEX_FILE = "cookie_index.json"
+DEFAULT_COOKIE_TYPE = "both"
+admin_cookie_type = {}
+awaiting_cookie_type = set()
+
+REQUIRED_CHANNEL = "@dansmethod"
+CHANNEL_LINK = "https://t.me/dansmethod"
+MEMBER_CACHE_TTL = 3600
+member_cache = {}
+
+USERS_FILE = "users.json"
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_users(users):
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(dict.fromkeys(users)), f)
+    except Exception as e:
+        logger.warning(f"Failed to save users: {e}")
+
+def add_user(chat_id):
+    users = load_users()
+    if chat_id not in users:
+        users.append(chat_id)
+        save_users(users)
+
+LANG = {
+    "en": {
+        "menu": "\U0001f3e0 Menu",
+        "get_netflix_btn": "\U0001f3ac Get a Netflix",
+        "paste_cookie_btn": "\U0001f4cb I paste cookie myself",
+        "send_cookie_prompt": "Send me your cookie text now.",
+        "help_btn": "\u2753 Help",
+        "about_btn": "\u2139\ufe0f About",
+        "format_btn": "\U0001f4cb Format",
+        "guide_btn": "\U0001f4f1 Guide",
+        "lang_btn": "\U0001f1f7\U0001f1f1 KH",
+        "checking": "\u23f3 Checking cookie... Please wait.",
+        "get_netflix_checking": "\U0001f3b2 Picking a random cookie and checking...",
+        "no_cookies_left": "\U0001f4ad No cookies left in the pool.",
+        "cookie_removed": "\U0001f5d1\ufe0f Dead cookie removed from pool.",
+        "cooldown": "\u23f3 Please wait {minutes}m {seconds}s before using this again.",
+        "alive": "\u2705 Cookie is LIVE!",
+        "dead": "\u274c Cookie is dead, try another.",
+        "plan": "\U0001f4e6 Plan",
+        "country": "\U0001f30d Country",
+        "mobile_login": "\U0001f4f1 Mobile Login",
+        "expires": "\u23f3 Token expires",
+        "no_link": "\u26a0\ufe0f Could not generate mobile link: {err}",
+        "start_msg": "\U0001f916 <b>Dan Sun - Netflix Cookie Checker</b>\n\nI check Netflix cookies and generate mobile login links.\n\n\U0001f447 Choose an option below:",
+        "help_msg": "\U0001f4ac <b>How to use</b>\n\n1. Get a Netflix cookie (Netscape .txt or JSON format)\n2. Paste it here as a message\n3. I'll check if it's valid\n4. If live, you get a mobile NFToken login link\n\n<b>Supported formats:</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\txxx</code>\nor JSON array format.",
+        "about_msg": "\U0001f916 <b>Dan Sun - Netflix Cookie Checker</b>\n\n\u2705 Checks Netflix cookies\n\U0001f4f1 Generates mobile NFToken login links\n\U0001f310 Free 24/7 hosted on Render\n\nJust send a cookie to get started!",
+        "guide_msg": "\U0001f4f1 <b>How to use the mobile link</b>\n\n\U0001f5a5 <b>Android:</b>\n1. Clear Netflix app cache or delete app data\n2. Copy the generated login link\n3. Paste into default browser\n4. Auto login to Netflix\n\n\U0001f4f1 <b>iPhone / iPad:</b>\n1. Logout from previous Netflix app account\n2. Copy the generated login link\n3. Paste into default browser\n4. Auto login to Netflix app",
+        "format_msg": "<b>Netscape format (.txt):</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\tyourNetflixIdHere\n.netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\tyourSecureIdHere</code>\n\n<b>JSON format:</b>\n<code>[{{\"domain\":\".netflix.com\",\"name\":\"NetflixId\",\"value\":\"xxx\"}}]</code>\n\nJust copy and paste the whole thing here.",
+        "cookie_text": "Cookie text:",
+        "admin_btn": "\U0001f6e1\ufe0f Admin",
+        "enter_password": "\U0001f511 Enter admin password:",
+        "wrong_password": "\u274c Wrong password.",
+        "broadcast_prompt": "\U0001f4e2 Enter the broadcast message to send to all users:",
+        "broadcast_sent": "\u2705 Broadcast sent to {count} users.",
+        "broadcast_sending": "\u23f3 Broadcasting message to {count} users...",
+        "language_set": "\u2705 Language set to English",
+        "admin_panel_title": "\U0001f6e1\ufe0f Admin Panel",
+        "admin_select_type": "\U0001f3af Select Cookie Type",
+        "admin_basic_btn": "\U0001f4e6 Basic",
+        "admin_premium_btn": "\U0001f4b0 Premium",
+        "admin_both_btn": "\U0001f504 Both (All)",
+        "admin_back_btn": "\u00ab Back",
+        "admin_main_menu_btn": "\U0001f3e0 Main Menu",
+        "admin_broadcast_btn": "\U0001f4e2 Broadcast",
+        "admin_current_type": "Current cookie type: {type}",
+        "admin_type_set": "\u2705 Cookie type set to {type}",
+    },
+    "kh": {
+        "menu": "\U0001f3e0 ម៉ឺនុយ",
+        "get_netflix_btn": "\U0001f3ac យក Netflix",
+        "paste_cookie_btn": "\U0001f4cb ខ្ញុំបិទភ្ជាប់ cookie ដោយខ្លួនឯង",
+        "send_cookie_prompt": "ផ្ញើអត្ថបទ cookie របស់អ្នកមកឥឡូវនេះ។",
+        "help_btn": "\u2753 ជំនួយ",
+        "about_btn": "\u2139\ufe0f អំពី",
+        "format_btn": "\U0001f4cb ទម្រង់",
+        "guide_btn": "\U0001f4f1 ការណែនាំ",
+        "lang_btn": "\U0001f1fa\U0001f1f8 EN",
+        "checking": "\u23f3 កំពុងពិនិត្យ Cookie... សូមរង់ចាំ។",
+        "get_netflix_checking": "\U0001f3b2 កំពុងជ្រើសរើស cookie ចៃដន្យ និងពិនិត្យ...",
+        "no_cookies_left": "\U0001f4ad គ្មាន cookie នៅសល់ក្នុងបញ្ជីទេ។",
+        "cookie_removed": "\U0001f5d1\ufe0f Cookie ស្លាប់ត្រូវបានដកចេញពីបញ្ជី។",
+        "cooldown": "\u23f3 សូមរង់ចាំ {minutes}នាទី {seconds}វិនាទី មុនពេលប្រើម្តងទៀត។",
+        "alive": "\u2705 Cookie នៅរស់!",
+        "dead": "\u274c Cookie ស្លាប់ហើយ សូមសាកល្បងមួយផ្សេងទៀត។",
+        "plan": "\U0001f4e6 គម្រោង",
+        "country": "\U0001f30d ប្រទេស",
+        "mobile_login": "\U0001f4f1 ចូលតាមទូរស័ព្ទ",
+        "expires": "\u23f3 ផុតកំណត់",
+        "no_link": "\u26a0\ufe0f មិនអាចបង្កើតតំណភ្ជាប់បានទេ: {err}",
+        "start_msg": "\U0001f916 <b>Dan Sun - អ្នកពិនិត្យ Cookie Netflix</b>\n\nខ្ញុំពិនិត្យ Netflix cookies និងបង្កើតតំណភ្ជាប់ចូលតាមទូរស័ព្ទ។\n\n\U0001f447 ជ្រើសរើសជម្រើសខាងក្រោម:",
+        "help_msg": "\U0001f4ac <b>របៀបប្រើប្រាស់</b>\n\n1. យក Netflix cookie (ទម្រង់ Netscape .txt ឬ JSON)\n2. បិទភ្ជាប់វានៅទីនេះ\n3. ខ្ញុំនឹងពិនិត្យថាតើវានៅរស់ឬទេ\n4. បើនៅរស់ អ្នកនឹងទទួលបានតំណចូលតាមទូរស័ព្ទ\n\n<b>ទម្រង់ដែលគាំទ្រ:</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\txxx</code>\nឬ JSON array ។",
+        "about_msg": "\U0001f916 <b>Dan Sun - អ្នកពិនិត្យ Cookie Netflix</b>\n\n\u2705 ពិនិត្យ Netflix cookies\n\U0001f4f1 បង្កើតតំណចូលតាមទូរស័ព្ទ\n\U0001f310 ដំណើរការ 24/7 ដោយឥតគិតថ្លៃ\n\nគ្រាន់តែផ្ញើ cookie ដើម្បីចាប់ផ្តើម!",
+        "guide_msg": "\U0001f4f1 <b>របៀបប្រើតំណភ្ជាប់ទូរស័ព្ទ</b>\n\n\U0001f5a5 <b>Android:</b>\n1. សម្អាត cache ឬលុបទិន្នន័យកម្មវិធី Netflix\n2. ចម្លងតំណភ្ជាប់ដែលបានបង្កើត\n3. បិទភ្ជាប់ទៅក្នុង browser ធម្មតា\n4. ចូល Netflix ដោយស្វ័យប្រវត្តិ\n\n\U0001f4f1 <b>iPhone / iPad:</b>\n1. ចាកចេញពីគណនី Netflix មុន\n2. ចម្លងតំណភ្ជាប់ដែលបានបង្កើត\n3. បិទភ្ជាប់ទៅក្នុង browser ធម្មតា\n4. ចូលកម្មវិធី Netflix ដោយស្វ័យប្រវត្តិ",
+        "format_msg": "<b>ទម្រង់ Netscape (.txt):</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\tyourNetflixIdHere\n.netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\tyourSecureIdHere</code>\n\n<b>ទម្រង់ JSON:</b>\n<code>[{{\"domain\":\".netflix.com\",\"name\":\"NetflixId\",\"value\":\"xxx\"}}]</code>\n\nគ្រាន់តែចម្លង និងបិទភ្ជាប់វានៅទីនេះ។",
+        "cookie_text": "អត្ថបទ Cookie:",
+        "admin_btn": "\U0001f6e1\ufe0f អ្នកគ្រប់គ្រង",
+        "enter_password": "\U0001f511 បញ្ចូលពាក្យសម្ងាត់អ្នកគ្រប់គ្រង៖",
+        "wrong_password": "\u274c ពាក្យសម្ងាត់ខុស។",
+        "broadcast_prompt": "\U0001f4e2 បញ្ចូលសារផ្សាយដើម្បីផ្ញើទៅកាន់អ្នកប្រើប្រាស់ទាំងអស់៖",
+        "broadcast_sent": "\u2705 បានផ្សាយរួចរាល់ {count} អ្នកប្រើប្រាស់។",
+        "broadcast_sending": "\u23f3 កំពុងផ្សាយសារទៅកាន់ {count} អ្នកប្រើប្រាស់...",
+        "language_set": "\u2705 បានប្តូរទៅជាភាសាខ្មែរ",
+        "admin_panel_title": "\U0001f6e1\ufe0f ផ្ទាំងគ្រប់គ្រង",
+        "admin_select_type": "\U0001f3af ជ្រើសរើសប្រភេទ Cookie",
+        "admin_basic_btn": "\U0001f4e6 Basic",
+        "admin_premium_btn": "\U0001f4b0 Premium",
+        "admin_both_btn": "\U0001f504 ទាំងអស់",
+        "admin_back_btn": "\u00ab ត្រឡប់",
+        "admin_main_menu_btn": "\U0001f3e0 ម៉ឺនុយ",
+        "admin_broadcast_btn": "\U0001f4e2 ផ្សាយ",
+        "admin_current_type": "ប្រភេទ Cookie បច្ចុប្បន្ន: {type}",
+        "admin_type_set": "\u2705 បានកំណត់ប្រភេទ Cookie ជា {type}",
+    },
+}
+
+
+def t(chat_id, key, **kwargs):
+    lang = user_lang.get(chat_id, "en")
+    text = LANG.get(lang, LANG["en"]).get(key, key)
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
+
+def is_channel_member(chat_id):
+    now = time.time()
+    if chat_id in member_cache:
+        if now < member_cache[chat_id]:
+            return True
+    try:
+        url = f"{API_BASE}{BOT_TOKEN}/getChatMember"
+        resp = requests.post(url, json={"chat_id": REQUIRED_CHANNEL, "user_id": chat_id}, timeout=10)
+        result = resp.json()
+        if result.get("ok"):
+            status = result["result"]["status"]
+            if status in ("member", "administrator", "creator"):
+                member_cache[chat_id] = now + MEMBER_CACHE_TTL
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to check channel membership for {chat_id}: {e}")
+    return False
+
+def detect_cookie_type(filename):
+    name_lower = filename.lower()
+    if "basic" in name_lower:
+        return "basic"
+    if "premium" in name_lower:
+        return "premium"
+    if "mobile" in name_lower:
+        return "mobile"
+    if "standard" in name_lower:
+        return "standard"
+    return "unknown"
+
+def send_message(chat_id, text, parse_mode=None, keyboard=None):
+    url = f"{API_BASE}{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    if keyboard:
+        data["reply_markup"] = json.dumps({"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": False})
+    try:
+        requests.post(url, json=data, timeout=10)
+    except Exception as e:
+        logger.warning(f"sendMessage failed: {e}")
+
+
+COUNTRY_FULL_NAMES = {
+    "IN": "INDIA", "US": "USA", "GB": "UK", "CA": "CANADA", "AU": "AUSTRALIA",
+    "DE": "GERMANY", "FR": "FRANCE", "IT": "ITALY", "ES": "SPAIN", "PT": "PORTUGAL",
+    "NL": "NETHERLANDS", "BE": "BELGIUM", "CH": "SWITZERLAND", "AT": "AUSTRIA",
+    "SE": "SWEDEN", "NO": "NORWAY", "DK": "DENMARK", "FI": "FINLAND", "PL": "POLAND",
+    "CZ": "CZECHIA", "SK": "SLOVAKIA", "HU": "HUNGARY", "RO": "ROMANIA", "BG": "BULGARIA",
+    "GR": "GREECE", "HR": "CROATIA", "SI": "SLOVENIA", "LT": "LITHUANIA", "LV": "LATVIA",
+    "EE": "ESTONIA", "IE": "IRELAND", "IS": "ICELAND", "LU": "LUXEMBOURG",
+    "JP": "JAPAN", "KR": "SOUTH KOREA", "CN": "CHINA", "TW": "TAIWAN", "HK": "HONG KONG",
+    "SG": "SINGAPORE", "MY": "MALAYSIA", "TH": "THAILAND", "VN": "VIETNAM",
+    "PH": "PHILIPPINES", "ID": "INDONESIA", "IN": "INDIA", "LK": "SRI LANKA",
+    "BD": "BANGLADESH", "PK": "PAKISTAN", "NP": "NEPAL", "MM": "MYANMAR",
+    "AE": "UAE", "SA": "SAUDI ARABIA", "KW": "KUWAIT", "QA": "QATAR", "BH": "BAHRAIN",
+    "OM": "OMAN", "JO": "JORDAN", "LB": "LEBANON", "IL": "ISRAEL", "TR": "TURKEY",
+    "EG": "EGYPT", "ZA": "SOUTH AFRICA", "NG": "NIGERIA", "KE": "KENYA",
+    "MA": "MOROCCO", "TN": "TUNISIA", "CI": "CÔTE D'IVOIRE", "GH": "GHANA",
+    "AR": "ARGENTINA", "BR": "BRAZIL", "CL": "CHILE", "CO": "COLOMBIA",
+    "MX": "MEXICO", "PE": "PERU", "EC": "ECUADOR", "UY": "URUGUAY",
+    "RU": "RUSSIA", "UA": "UKRAINE", "KZ": "KAZAKHSTAN",
+    "MO": "MACAU", "RE": "RÉUNION", "CV": "CAPE VERDE", "MD": "MOLDOVA",
+    "BA": "BOSNIA", "AL": "ALBANIA", "MK": "NORTH MACEDONIA", "MT": "MALTA",
+    "PR": "PUERTO RICO", "DO": "DOMINICAN REPUBLIC", "CR": "COSTA RICA",
+    "PA": "PANAMA", "GT": "GUATEMALA", "SV": "EL SALVADOR", "HN": "HONDURAS",
+    "BO": "BOLIVIA", "PY": "PARAGUAY", "TT": "TRINIDAD AND TOBAGO",
+    "JM": "JAMAICA", "BS": "BAHAMAS", "BB": "BARBADOS",
+    "ZW": "ZIMBABWE", "ZM": "ZAMBIA", "MW": "MALAWI", "MZ": "MOZAMBIQUE",
+    "AO": "ANGOLA", "UG": "UGANDA", "TZ": "TANZANIA", "ET": "ETHIOPIA",
+    "SN": "SENEGAL", "CM": "CAMEROON", "BI": "BURUNDI", "RW": "RWANDA",
+    "AZ": "AZERBAIJAN", "GE": "GEORGIA", "AM": "ARMENIA", "UZ": "UZBEKISTAN",
+    "BY": "BELARUS", "RS": "SERBIA", "ME": "MONTENEGRO", "XK": "KOSOVO",
+    "NZ": "NEW ZEALAND", "PG": "PAPUA NEW GUINEA", "FJ": "FIJI",
+}
+
+def full_country_name(code):
+    if not code:
+        return "??"
+    upper = code.strip().upper()
+    return COUNTRY_FULL_NAMES.get(upper, upper)
+
+
+def format_expiry_cambodia(utc_str):
+    """Convert '2026-06-14 09:08:05 UTC' to Cambodia time (UTC+7)."""
+    if not utc_str:
+        return None
+    try:
+        utc_dt = datetime.strptime(utc_str.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        kh_dt = utc_dt + timedelta(hours=7)
+        return kh_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return utc_str
+
+
+def _extract_earliest_expiry(filepath):
+    """Read a cookie file and return the earliest expiry timestamp, or 0 if none."""
+    earliest = None
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 7 and parts[5] in ("NetflixId", "SecureNetflixId"):
+                    try:
+                        exp = int(float(parts[4]))
+                        if exp > 0 and (earliest is None or exp < earliest):
+                            earliest = exp
+                    except (ValueError, IndexError):
+                        pass
+    except Exception:
+        pass
+    return earliest if earliest is not None else 0
+
+
+def build_cookie_index():
+    """Scan all .txt files in cookies/ and build/update the expiry index."""
+    cookie_dir = cookies_folder
+    if not os.path.exists(cookie_dir):
+        return {}
+    index = {}
+    for fname in os.listdir(cookie_dir):
+        if not fname.lower().endswith(".txt"):
+            continue
+        filepath = os.path.join(cookie_dir, fname)
+        index[fname] = _extract_earliest_expiry(filepath)
+    _save_index(index)
+    return index
+
+
+def _save_index(index):
+    try:
+        with open(INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(index, f, separators=(",", ":"))
+    except Exception as e:
+        logger.warning(f"Failed to save cookie index: {e}")
+
+
+def _load_index():
+    if not os.path.exists(INDEX_FILE):
+        return None
+    try:
+        with open(INDEX_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def get_sorted_cookie_files():
+    """Return .txt files sorted by expiry ascending (soonest first)."""
+    cookie_dir = cookies_folder
+    if not os.path.exists(cookie_dir):
+        return []
+
+    current = {f for f in os.listdir(cookie_dir) if f.lower().endswith(".txt")}
+    if not current:
+        return []
+
+    index = _load_index()
+    if index is None:
+        index = build_cookie_index()
+    else:
+        stale = set(index.keys()) - current
+        if stale:
+            for k in stale:
+                del index[k]
+        new = current - set(index.keys())
+        if new:
+            for fname in new:
+                filepath = os.path.join(cookie_dir, fname)
+                index[fname] = _extract_earliest_expiry(filepath)
+        if stale or new:
+            _save_index(index)
+
+    sorted_files = sorted(current, key=lambda f: (
+        1 if index.get(f, 0) == 0 else 0,
+        index.get(f, 0) or 0,
+        f,
+    ))
+    return sorted_files
+
+
+def check_single_cookie(cookie_text):
+    bundles = extract_netflix_cookie_bundles(cookie_text)
+    if not bundles:
+        return {"ok": False, "error": "No Netflix cookies found in the text."}
+
+    bundle = bundles[0]
+    netscape_content = bundle.get("netscape_text", "")
+    cookies = bundle.get("cookies") or cookies_dict_from_netscape(netscape_content)
+
+    if not cookies or not has_required_netflix_cookies(cookies):
+        return {"ok": False, "error": "Missing required NetflixId cookie."}
+
+    session = requests.Session()
+    session.cookies.update(cookies)
+
+    for _ in range(2):
+        try:
+            response_text, status_code, extracted_info = get_account_page(
+                session,
+                proxy=None,
+                request_timeout=REQUEST_TIMEOUT,
+                fallback_account_page=True,
+            )
+            if status_code == 200 and response_text:
+                break
+            if status_code in RETRYABLE_STATUS_CODES:
+                continue
+            break
+        except requests.exceptions.Timeout:
+            return {"ok": False, "error": "Request timed out. Try again."}
+        except requests.exceptions.RequestException as e:
+            return {"ok": False, "error": f"Network error: {e}"}
+    else:
+        status_code = 0
+
+    if status_code != 200 or not response_text:
+        return {"ok": False, "error": "Cookie is dead or invalid."}
+
+    info = extracted_info or extract_info(response_text)
+    country = decode_netflix_value(info.get("countryOfSignup"))
+
+    if not country:
+        return {"ok": False, "error": "Cookie is dead or invalid."}
+
+    is_subscribed = is_subscribed_account(info)
+    plan_key, plan_label = derive_plan_info(info, is_subscribed)
+
+    if not is_subscribed:
+        return {"ok": False, "error": f"Cookie is free ({plan_label}). No active subscription."}
+
+    on_hold = is_on_hold_account(info)
+    if on_hold:
+        return {"ok": False, "error": f"Account is on hold ({plan_label})."}
+
+    nftoken_data, nftoken_error = create_nftoken(cookies, NFTOKEN_RETRY_ATTEMPTS)
+    if not nftoken_data or not has_usable_nftoken(nftoken_data):
+        return {
+            "ok": True,
+            "plan": plan_label,
+            "country": country,
+            "nftoken_error": nftoken_error or "NFToken unavailable",
+            "mobile_link": None,
+        }
+
+    links = build_nftoken_links(nftoken_data["token"], "both")
+    mobile_link = next((url for label, url in links if "Phone" in label), None)
+    pc_link = next((url for label, url in links if "PC" in label), None)
+
+    return {
+        "ok": True,
+        "plan": plan_label,
+        "country": country,
+        "mobile_link": mobile_link,
+        "pc_link": pc_link,
+        "expires": nftoken_data.get("expires_at_utc"),
+    }
+
+
+def get_random_cookie_and_check(cookie_type=None):
+    cookie_dir = cookies_folder
+    if not os.path.exists(cookie_dir):
+        return {"ok": False, "error": "No cookies folder found."}
+
+    tried = set()
+
+    while True:
+        sorted_files = get_sorted_cookie_files()
+        available = [f for f in sorted_files if f not in tried]
+
+        if cookie_type and cookie_type != "both":
+            available = [f for f in available if detect_cookie_type(f) == cookie_type]
+
+        if not available:
+            return {"ok": False, "error": "No cookies available in the pool."}
+
+        cookie_file = random.choice(available)
+        tried.add(cookie_file)
+        file_path = os.path.join(cookie_dir, cookie_file)
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception as e:
+            move_cookie_with_reason(file_path, broken_folder, cookie_file, "file read error")
+            continue
+
+        result = check_single_cookie(content)
+        result["file"] = cookie_file
+
+        if not result["ok"]:
+            error_reason = result.get("error", "dead")
+            if any(t in error_reason.lower() for t in ("timeout", "network", "error", "equest")):
+                move_cookie_with_reason(file_path, broken_folder, cookie_file, error_reason)
+            else:
+                move_cookie_with_reason(file_path, failed_folder, cookie_file, error_reason)
+            continue
+
+        # Remove used cookie from pool whether alive or dead
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to remove used cookie {cookie_file}: {e}")
+
+        return result
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Dan Sun - Netflix Cookie Checker Bot is running."
+
+
+def process_cookie_async(chat_id, text, user):
+    try:
+        result_data = check_single_cookie(text)
+    except Exception as e:
+        logger.exception("Error checking cookie")
+        send_message(chat_id, f"\u274c Error: {e}")
+        return
+
+    if not result_data["ok"]:
+        send_message(chat_id, f"{t(chat_id, 'dead')}\n\n{result_data['error']}")
+        return
+
+    plan = result_data.get("plan", "Unknown")
+    country = full_country_name(result_data.get("country"))
+    mobile_link = result_data.get("mobile_link")
+    pc_link = result_data.get("pc_link")
+
+    logout_warning = "\n\n⚠️ Do not log out the account once you are in, logging out will kill the cookie for other people"
+
+    if mobile_link or pc_link:
+        msg_text = (
+            f"{t(chat_id, 'alive')}\n"
+            f"{t(chat_id, 'plan')}: {plan}\n"
+            f"{t(chat_id, 'country')}: {country}\n"
+        )
+        if pc_link:
+            msg_text += f'\n🖥️ PC Login: <a href="{pc_link}">Click to Login</a>'
+        if mobile_link:
+            msg_text += f'\n📱 Mobile Login: <a href="{mobile_link}">Click to Login</a>'
+            msg_text += '\n⚠️ iOS: Link won\'t open in Telegram. Copy and open in Safari.'
+        msg_text += logout_warning
+        expiry_kh = format_expiry_cambodia(result_data.get("expires"))
+        if expiry_kh:
+            msg_text += f"\n\n{t(chat_id, 'expires')}: {expiry_kh}"
+    else:
+        nftoken_err = result_data.get("nftoken_error", "Unknown error")
+        escaped = text[:200].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        msg_text = (
+            f"{t(chat_id, 'alive')} ({plan} | {country})\n"
+            f"{t(chat_id, 'no_link', err=nftoken_err)}\n\n"
+            f"{t(chat_id, 'cookie_text')}\n<code>{escaped}</code>"
+        )
+
+    send_message(chat_id, msg_text, parse_mode="HTML")
+
+
+def send_broadcast(admin_chat_id, message_text):
+    users = load_users()
+    send_message(admin_chat_id, t(admin_chat_id, "broadcast_sending", count=len(users)))
+    sent = 0
+    for uid in users:
+        try:
+            send_message(uid, message_text, parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Broadcast failed to {uid}: {e}")
+    send_message(admin_chat_id, t(admin_chat_id, "broadcast_sent", count=sent))
+
+
+def process_get_netflix_async(chat_id):
+    try:
+        cookie_type = admin_cookie_type.get(chat_id, DEFAULT_COOKIE_TYPE) if chat_id in admins else None
+        result_data = get_random_cookie_and_check(cookie_type)
+    except Exception as e:
+        logger.exception("Error in Get a Netflix")
+        send_message(chat_id, f"\u274c Error: {e}")
+        return
+
+    if not result_data["ok"]:
+        cooldowns.pop(chat_id, None)
+        send_message(chat_id, t(chat_id, "no_cookies_left"))
+        return
+
+    plan = result_data.get("plan", "Unknown")
+    country = full_country_name(result_data.get("country"))
+    mobile_link = result_data.get("mobile_link")
+    pc_link = result_data.get("pc_link")
+    cookie_file = result_data.get("file", "")
+
+    logout_warning = "\n\n⚠️ Do not log out the account once you are in, logging out will kill the cookie for other people"
+
+    if mobile_link or pc_link:
+        msg_text = (
+            f"{t(chat_id, 'alive')}\n"
+            f"{t(chat_id, 'plan')}: {plan}\n"
+            f"{t(chat_id, 'country')}: {country}\n"
+        )
+        if pc_link:
+            msg_text += f'\n🖥️ PC Login: <a href="{pc_link}">Click to Login</a>'
+        if mobile_link:
+            msg_text += f'\n📱 Mobile Login: <a href="{mobile_link}">Click to Login</a>'
+            msg_text += '\n⚠️ iOS: Link won\'t open in Telegram. Copy and open in Safari.'
+        msg_text += logout_warning
+        expiry_kh = format_expiry_cambodia(result_data.get("expires"))
+        if expiry_kh:
+            msg_text += f"\n\n{t(chat_id, 'expires')}: {expiry_kh}"
+    else:
+        nftoken_err = result_data.get("nftoken_error", "Unknown error")
+        msg_text = (
+            f"{t(chat_id, 'alive')} ({plan} | {country})\n"
+            f"{t(chat_id, 'no_link', err=nftoken_err)}"
+        )
+
+    send_message(chat_id, msg_text, parse_mode="HTML")
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = flask.request.get_json(silent=True)
+    if not update:
+        return "ok", 200
+
+    msg = update.get("message")
+    if not msg or not msg.get("text"):
+        return "ok", 200
+
+    text = msg["text"].strip()
+    chat_id = msg["chat"]["id"]
+    user = msg["from"].get("first_name", "User")
+
+    if not is_channel_member(chat_id):
+        for s in (awaiting_cookie, awaiting_admin_password, awaiting_broadcast, admins):
+            s.discard(chat_id)
+        msg_text = (
+            "\u26a0\ufe0f <b>Channel membership required!</b>\n\n"
+            "You must join our channel to use this bot.\n\n"
+            f"\U0001f449 <a href=\"{CHANNEL_LINK}\">Join @dansmethod</a>\n\n"
+            "After joining, send /start again."
+        )
+        send_message(chat_id, msg_text, parse_mode="HTML")
+        return "ok", 200
+
+    if text == "/language" or text == "\U0001f1f7\U0001f1f1 KH" or text == "\U0001f1fa\U0001f1f8 EN":
+        current = user_lang.get(chat_id, "en")
+        new_lang = "kh" if current == "en" else "en"
+        user_lang[chat_id] = new_lang
+        add_user(chat_id)
+        send_message(chat_id, t(chat_id, "language_set"), keyboard=[
+            [t(chat_id, "get_netflix_btn")],
+            [t(chat_id, "paste_cookie_btn")],
+            [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+            [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+            [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+        ])
+        return "ok", 200
+
+    if text == "/start" or text == t(chat_id, "menu"):
+        add_user(chat_id)
+        for s in (awaiting_cookie, awaiting_admin_password, awaiting_broadcast):
+            s.discard(chat_id)
+        send_message(
+            chat_id, t(chat_id, "start_msg"), parse_mode="HTML",
+            keyboard=[
+                [t(chat_id, "get_netflix_btn")],
+                [t(chat_id, "paste_cookie_btn")],
+                [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+                [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+                [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+            ],
+        )
+        return "ok", 200
+
+    if text == t(chat_id, "get_netflix_btn"):
+        if chat_id not in admins:
+            now = time.time()
+            entry = cooldowns.get(chat_id)
+            if entry:
+                elapsed = now - entry["first_use"]
+                if elapsed < COOLDOWN_SECONDS:
+                    if entry["count"] >= 3:
+                        remaining = int(COOLDOWN_SECONDS - elapsed)
+                        minutes, seconds = divmod(remaining, 60)
+                        send_message(chat_id, t(chat_id, "cooldown", minutes=minutes, seconds=seconds))
+                        return "ok", 200
+                    entry["count"] += 1
+                else:
+                    entry["first_use"] = now
+                    entry["count"] = 1
+            else:
+                cooldowns[chat_id] = {"first_use": now, "count": 1}
+        if chat_id in admins:
+            cookie_type = admin_cookie_type.get(chat_id, DEFAULT_COOKIE_TYPE)
+            type_msg = f" ({cookie_type.upper()})" if cookie_type != "both" else ""
+            send_message(chat_id, f"{t(chat_id, 'get_netflix_checking')}{type_msg}")
+        else:
+            send_message(chat_id, t(chat_id, "get_netflix_checking"))
+        threading.Thread(
+            target=process_get_netflix_async,
+            args=(chat_id,),
+            daemon=True,
+        ).start()
+        return "ok", 200
+
+    if text == t(chat_id, "paste_cookie_btn"):
+        add_user(chat_id)
+        awaiting_cookie.add(chat_id)
+        send_message(chat_id, t(chat_id, "send_cookie_prompt"),
+                     keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if chat_id in awaiting_admin_password:
+        awaiting_admin_password.discard(chat_id)
+        if text == ADMIN_PASSWORD:
+            admins.add(chat_id)
+            admin_cookie_type[chat_id] = DEFAULT_COOKIE_TYPE
+            send_message(chat_id,
+                f"{t(chat_id, 'admin_panel_title')}\n{t(chat_id, 'admin_current_type', type=DEFAULT_COOKIE_TYPE.upper())}",
+                keyboard=[
+                    [t(chat_id, "admin_select_type")],
+                    [t(chat_id, "admin_broadcast_btn")],
+                    [t(chat_id, "admin_main_menu_btn")],
+                ])
+        else:
+            send_message(chat_id, t(chat_id, "wrong_password"),
+                         keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_select_type"):
+        if chat_id not in admins:
+            return "ok", 200
+        current_type = admin_cookie_type.get(chat_id, DEFAULT_COOKIE_TYPE)
+        send_message(chat_id, t(chat_id, "admin_current_type", type=current_type.upper()),
+                     keyboard=[
+                         [t(chat_id, "admin_basic_btn")],
+                         [t(chat_id, "admin_premium_btn")],
+                         [t(chat_id, "admin_both_btn")],
+                         [t(chat_id, "admin_back_btn")],
+                     ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_basic_btn") and chat_id in admins:
+        admin_cookie_type[chat_id] = "basic"
+        send_message(chat_id, t(chat_id, "admin_type_set", type="Basic"),
+                     keyboard=[
+                         [t(chat_id, "admin_select_type")],
+                         [t(chat_id, "admin_broadcast_btn")],
+                         [t(chat_id, "admin_main_menu_btn")],
+                     ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_premium_btn") and chat_id in admins:
+        admin_cookie_type[chat_id] = "premium"
+        send_message(chat_id, t(chat_id, "admin_type_set", type="Premium"),
+                     keyboard=[
+                         [t(chat_id, "admin_select_type")],
+                         [t(chat_id, "admin_broadcast_btn")],
+                         [t(chat_id, "admin_main_menu_btn")],
+                     ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_both_btn") and chat_id in admins:
+        admin_cookie_type[chat_id] = "both"
+        send_message(chat_id, t(chat_id, "admin_type_set", type="Both (All)"),
+                     keyboard=[
+                         [t(chat_id, "admin_select_type")],
+                         [t(chat_id, "admin_broadcast_btn")],
+                         [t(chat_id, "admin_main_menu_btn")],
+                     ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_back_btn"):
+        if chat_id not in admins:
+            return "ok", 200
+        current_type = admin_cookie_type.get(chat_id, DEFAULT_COOKIE_TYPE)
+        send_message(chat_id,
+            f"{t(chat_id, 'admin_panel_title')}\n{t(chat_id, 'admin_current_type', type=current_type.upper())}",
+            keyboard=[
+                [t(chat_id, "admin_select_type")],
+                [t(chat_id, "admin_broadcast_btn")],
+                [t(chat_id, "admin_main_menu_btn")],
+            ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_main_menu_btn"):
+        send_message(chat_id, t(chat_id, "start_msg"), parse_mode="HTML",
+                     keyboard=[
+                         [t(chat_id, "get_netflix_btn")],
+                         [t(chat_id, "paste_cookie_btn")],
+                         [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+                         [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+                         [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+                     ])
+        return "ok", 200
+
+    if text == t(chat_id, "admin_broadcast_btn"):
+        if chat_id not in admins:
+            return "ok", 200
+        awaiting_broadcast.add(chat_id)
+        send_message(chat_id, t(chat_id, "broadcast_prompt"),
+                     keyboard=[[t(chat_id, "admin_back_btn")]])
+        return "ok", 200
+
+    if chat_id in awaiting_broadcast:
+        awaiting_broadcast.discard(chat_id)
+        threading.Thread(
+            target=send_broadcast,
+            args=(chat_id, text),
+            daemon=True,
+        ).start()
+        return "ok", 200
+
+    if text == t(chat_id, "admin_btn"):
+        if chat_id in admins:
+            current_type = admin_cookie_type.get(chat_id, DEFAULT_COOKIE_TYPE)
+            send_message(chat_id,
+                f"{t(chat_id, 'admin_panel_title')}\n{t(chat_id, 'admin_current_type', type=current_type.upper())}",
+                keyboard=[
+                    [t(chat_id, "admin_select_type")],
+                    [t(chat_id, "admin_broadcast_btn")],
+                    [t(chat_id, "admin_main_menu_btn")],
+                ])
+        else:
+            awaiting_admin_password.add(chat_id)
+            send_message(chat_id, t(chat_id, "enter_password"),
+                         keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text == "/help" or text == t(chat_id, "help_btn"):
+        send_message(chat_id, t(chat_id, "help_msg"), parse_mode="HTML",
+                     keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text == "/about" or text == t(chat_id, "about_btn"):
+        send_message(chat_id, t(chat_id, "about_msg"), parse_mode="HTML",
+                     keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text == "/guide" or text == t(chat_id, "guide_btn"):
+        send_message(chat_id, t(chat_id, "guide_msg"), parse_mode="HTML",
+                     keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text == t(chat_id, "format_btn"):
+        send_message(chat_id, t(chat_id, "format_msg"), parse_mode="HTML",
+                     keyboard=[[t(chat_id, "menu")]])
+        return "ok", 200
+
+    if text.startswith("/"):
+        return "ok", 200
+
+    if chat_id not in awaiting_cookie:
+        return "ok", 200
+    awaiting_cookie.discard(chat_id)
+
+    send_message(chat_id, t(chat_id, "checking"))
+    logger.info(f"Checking cookie from {user} ({chat_id})")
+
+    threading.Thread(
+        target=process_cookie_async,
+        args=(chat_id, text, user),
+        daemon=True,
+    ).start()
+
+    return "ok", 200
+
+
+def set_webhook():
+    url = f"{API_BASE}{BOT_TOKEN}/setWebhook"
+    resp = requests.post(url, json={"url": f"{WEBHOOK_URL}/webhook"}, timeout=10)
+    result = resp.json()
+    if result.get("ok"):
+        logger.info(f"Webhook set to {WEBHOOK_URL}/webhook")
+    else:
+        logger.error(f"Failed to set webhook: {result}")
+
+    commands_url = f"{API_BASE}{BOT_TOKEN}/setMyCommands"
+    commands = [
+        {"command": "start", "description": "Show menu and start"},
+        {"command": "help", "description": "How to use the bot"},
+        {"command": "about", "description": "About this bot"},
+        {"command": "guide", "description": "How to use mobile link"},
+        {"command": "language", "description": "Switch language/ប្តូរភាសា"},
+    ]
+    requests.post(commands_url, json={"commands": commands}, timeout=10)
+
+    return result
+
+
+@app.route("/setup", methods=["GET"])
+def setup_route():
+    if not BOT_TOKEN or not WEBHOOK_URL:
+        return "Set BOT_TOKEN and WEBHOOK_URL env vars first.", 400
+    result = set_webhook()
+    if result.get("ok"):
+        return f"Webhook set to {WEBHOOK_URL}/webhook", 200
+    return f"Failed: {result}", 500
+
+
+if os.environ.get("BOT_TOKEN") and os.environ.get("WEBHOOK_URL"):
+    BOT_TOKEN = os.environ["BOT_TOKEN"]
+    WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+    try:
+        me = requests.get(f"{API_BASE}{BOT_TOKEN}/getMe", timeout=10).json()
+        if me.get("ok"):
+            logger.info(f"Bot @{me['result']['username']} authenticated")
+        set_webhook()
+    except Exception as e:
+        logger.warning(f"Webhook setup failed (will retry on /setup): {e}")
+
+
+def main():
+    global BOT_TOKEN, WEBHOOK_URL
+    if not BOT_TOKEN:
+        BOT_TOKEN = os.environ.get("BOT_TOKEN", "") or input("Bot Token: ").strip()
+    if not WEBHOOK_URL:
+        WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "") or input("Webhook URL (e.g. https://your-app.onrender.com): ").strip()
+
+    if not BOT_TOKEN or not WEBHOOK_URL:
+        print("BOT_TOKEN and WEBHOOK_URL are required.")
+        return
+
+    me = requests.get(f"{API_BASE}{BOT_TOKEN}/getMe", timeout=10).json()
+    if me.get("ok"):
+        logger.info(f"Bot @{me['result']['username']} authenticated")
+
+    set_webhook()
+
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    main()
