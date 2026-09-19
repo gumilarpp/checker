@@ -594,15 +594,10 @@ def process_get_netflix_async(chat_id):
     send_message(chat_id, msg_text, parse_mode="HTML")
 
 def handle_document(msg):
-    """Handle .txt document sent by user, save to cookies/ folder."""
     document = msg.get("document", {})
     file_id = document.get("file_id", "")
     file_name = document.get("file_name", "cookie.txt")
     chat_id = msg["chat"]["id"]
-
-    if not file_name.lower().endswith(".txt"):
-        send_message(chat_id, "❌ Kirim file .txt saja, ya.")
-        return
 
     try:
         # Get file path from Telegram
