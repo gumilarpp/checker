@@ -653,6 +653,82 @@ def handle_document(msg):
         logger.exception("Error handling document")
         send_message(chat_id, f"❌ Error: {e}")
 
+def handle_zip_document(msg):
+    """Handle .zip document, extract .txt cookies and check each."""
+    document = msg.get("document", {})
+    file_id = document.get("file_id", "")
+    file_name = document.get("file_name", "cookies.zip")
+    chat_id = msg["chat"]["id"]
+
+    if not file_name.lower().endswith(".zip"):
+        send_message(chat_id, "❌ Kirim file .zip saja, ya.")
+        return
+
+    try:
+        resp = requests.get(
+            f"{API_BASE}{BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10
+        ).json()
+        if not resp.get("ok"):
+            send_message(chat_id, "❌ Gagal ambil file dari Telegram.")
+            return
+        file_path = resp["result"]["file_path"]
+
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        resp3 = requests.get(download_url, timeout=30)
+        if resp3.status_code != 200:
+            send_message(chat_id, "❌ Gagal download file.")
+            return
+
+        # Extract zip to temp
+        import io, zipfile, tempfile
+        zip_data = io.BytesIO(resp3.content)
+        tmp_dir = tempfile.mkdtemp()
+
+        with zipfile.ZipFile(zip_data) as zf:
+            zf.extractall(tmp_dir)
+
+        # Find all .txt files
+        txt_files = []
+        for root, dirs, files in os.walk(tmp_dir):
+            for f in files:
+                if f.lower().endswith(".txt"):
+                    txt_files.append(os.path.join(root, f))
+
+        if not txt_files:
+            send_message(chat_id, "❌ Tidak ada file .txt di dalam zip.")
+            return
+
+        os.makedirs(cookies_folder, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_zip = file_name.replace(".zip", "")[:50]
+
+        checked = 0
+        for i, txt_path in enumerate(txt_files, 1):
+            with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read().strip()
+            if not content:
+                continue
+            filename = f"cookie_{safe_zip}_{i}_{timestamp}.txt"
+            filepath = os.path.join(cookies_folder, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            checked += 1
+            # Check in background thread
+            threading.Thread(
+                target=process_cookie_async,
+                args=(chat_id, content, f"file:{filename}"),
+                daemon=True,
+            ).start()
+
+        send_message(chat_id,
+            f"📦 {len(txt_files)} file ditemukan, {checked} cookies dicek.\n⏳ Sedang checking...")
+        logger.info(f"Zip processed: {len(txt_files)} txt files extracted")
+
+    except Exception as e:
+        logger.exception("Error handling zip")
+        send_message(chat_id, f"❌ Error: {e}")
+
 
 def handle_message(msg):
     text = msg["text"].strip()
@@ -971,7 +1047,15 @@ def main():
                     continue
                 try:
                     if msg.get("document"):
-                        handle_document(msg)
+                        doc = msg["document"]
+                        file_name = doc.get("file_name", "")
+                        chat_id = msg["chat"]["id"]
+                        if file_name.lower().endswith(".zip"):
+                            handle_zip_document(msg)
+                        elif file_name.lower().endswith(".txt"):
+                            handle_document(msg)
+                        else:
+                            send_message(chat_id, "❌ Format tidak didukung. Kirim .txt atau .zip saja.")
                     elif msg.get("text"):
                         handle_message(msg)
                 except Exception as e:
