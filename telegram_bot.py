@@ -457,7 +457,28 @@ def get_random_cookie_and_check(cookie_type=None):
 
         return result
 
+def save_cookie_to_file(cookie_text, chat_id):
+    """Save pasted cookie text to cookies/ folder as .txt file."""
+    try:
+        os.makedirs(cookies_folder, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"cookie_{chat_id}_{timestamp}.txt"
+        filepath = os.path.join(cookies_folder, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(cookie_text.strip())
+        logger.info(f"Saved cookie to {filepath}")
+        return filename
+    except Exception as e:
+        logger.warning(f"Failed to save cookie: {e}")
+        return None
+
+
 def process_cookie_async(chat_id, text, user):
+    # Auto-save cookie to cookies/ folder
+    saved_file = save_cookie_to_file(text, chat_id)
+    if saved_file:
+        logger.info(f"Cookie auto-saved: {saved_file}")
+
     try:
         result_data = check_single_cookie(text)
     except Exception as e:
