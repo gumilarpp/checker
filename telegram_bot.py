@@ -582,6 +582,71 @@ def process_get_netflix_async(chat_id):
 
     send_message(chat_id, msg_text, parse_mode="HTML")
 
+def handle_document(msg):
+    """Handle .txt document sent by user, save to cookies/ folder."""
+    document = msg.get("document", {})
+    file_id = document.get("file_id", "")
+    file_name = document.get("file_name", "cookie.txt")
+    chat_id = msg["chat"]["id"]
+
+    if not file_name.lower().endswith(".txt"):
+        send_message(chat_id, "❌ Kirim file .txt saja, ya.")
+        return
+
+    if "cookie" not in file_name.lower() and "netflix" not in file_name.lower():
+        send_message(chat_id, "⚠️ Pastikan file berisi cookie Netflix.")
+        return
+
+    try:
+        # Get file path from Telegram
+        resp = requests.get(
+            f"{API_BASE}{BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10
+        ).json()
+        if not resp.get("ok"):
+            send_message(chat_id, "❌ Gagal ambil file dari Telegram.")
+            return
+        file_path = resp["result"]["file_path"]
+
+        # Download file content
+        url = f"{API_BASE}{BOT_TOKEN}/downloadFile"
+        resp2 = requests.get(
+            f"{API_BASE}{BOT_TOKEN}/file?file_path={file_path}",
+            timeout=15
+        )
+        # Try the direct download endpoint
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        resp3 = requests.get(download_url, timeout=15)
+        if resp3.status_code != 200:
+            send_message(chat_id, "❌ Gagal download file.")
+            return
+
+        content = resp3.text
+
+        # Save to cookies/ folder
+        os.makedirs(cookies_folder, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = file_name.replace(".txt", "")[:50]
+        filename = f"cookie_{safe_name}_{timestamp}.txt"
+        filepath = os.path.join(cookies_folder, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content.strip())
+
+        logger.info(f"Document saved: {filepath} ({len(content)} chars)")
+        send_message(chat_id, f"✅ File tersimpan: `{filename}`\n📝 {len(content)} karakter", parse_mode="Markdown")
+
+        # Auto-check the cookie
+        threading.Thread(
+            target=process_cookie_async,
+            args=(chat_id, content, msg["from"].get("first_name", "User")),
+            daemon=True,
+        ).start()
+
+    except Exception as e:
+        logger.exception("Error handling document")
+        send_message(chat_id, f"❌ Error: {e}")
+
+
 def handle_message(msg):
     text = msg["text"].strip()
     chat_id = msg["chat"]["id"]
@@ -895,11 +960,15 @@ def main():
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message")
-                if msg and msg.get("text"):
-                    try:
+                if not msg:
+                    continue
+                try:
+                    if msg.get("document"):
+                        handle_document(msg)
+                    elif msg.get("text"):
                         handle_message(msg)
-                    except Exception as e:
-                        logger.exception(f"Error handle message: {e}")
+                except Exception as e:
+                    logger.exception(f"Error handle message: {e}")
 
         except requests.exceptions.Timeout:
             continue
