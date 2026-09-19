@@ -444,11 +444,12 @@ def get_random_cookie_and_check(cookie_type=None):
         result["file"] = cookie_file
 
         if not result["ok"]:
-            error_reason = result.get("error", "dead")
-            if any(t in error_reason.lower() for t in ("timeout", "network", "error", "equest")):
-                move_cookie_with_reason(file_path, broken_folder, cookie_file, error_reason)
-            else:
-                move_cookie_with_reason(file_path, failed_folder, cookie_file, error_reason)
+            # Hapus cookie mati dari folder
+            try:
+                os.remove(file_path)
+                logger.info(f"Deleted dead cookie: {cookie_file}")
+            except Exception as e:
+                logger.warning(f"Failed to delete dead cookie {cookie_file}: {e}")
             continue
 
         try:
@@ -489,6 +490,14 @@ def process_cookie_async(chat_id, text, user):
         return
 
     if not result_data["ok"]:
+        # Hapus file cookie mati dari folder
+        if saved_file:
+            filepath = os.path.join(cookies_folder, saved_file)
+            try:
+                os.remove(filepath)
+                logger.info(f"Deleted dead cookie: {filepath}")
+            except Exception as e:
+                logger.warning(f"Failed to delete cookie file: {e}")
         send_message(chat_id, f"{t(chat_id, 'dead')}\n\n{result_data['error']}")
         return
 
