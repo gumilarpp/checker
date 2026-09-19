@@ -1071,6 +1071,20 @@ def cookies_dict_from_netscape(netscape_text):
             value = parts[6]
             if is_netflix_cookie_entry(domain, name):
                 cookies[name] = value
+    # If nfvdid present, extract embedded NetflixId/SecureNetflixId from its value
+    if "nfvdid" in cookies:
+        nfvdid_val = cookies["nfvdid"]
+        # nfvdid value may contain ;NetflixId=...;SecureNetflixId=... at the end
+        for embedded_name in ("NetflixId", "SecureNetflixId"):
+            marker = f";{embedded_name}="
+            idx = nfvdid_val.find(marker)
+            if idx != -1:
+                start = idx + len(marker)
+                # Find end of this embedded value (next ; or end of string)
+                end = nfvdid_val.find(";", start)
+                if end == -1:
+                    end = len(nfvdid_val)
+                cookies[embedded_name] = nfvdid_val[start:end]
     return cookies
 
 
