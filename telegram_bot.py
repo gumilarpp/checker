@@ -109,6 +109,7 @@ LANG = {
         "guide_msg": "📱 <b>How to use the mobile link</b>\n\n💻 <b>Android:</b>\n1. Clear Netflix app cache or delete app data\n2. Copy the generated login link\n3. Paste into default browser\n4. Auto login to Netflix\n\n📱 <b>iPhone / iPad:</b>\n1. Logout from previous Netflix app account\n2. Copy the generated login link\n3. Paste into default browser\n4. Auto login to Netflix app",
         "format_msg": "<b>Netscape format (.txt):</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\tyourNetflixIdHere\n.netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\tyourSecureIdHere</code>\n\n<b>JSON format:</b>\n<code>[{\"domain\":\".netflix.com\",\"name\":\"NetflixId\",\"value\":\"xxx\"}]</code>\n\nJust copy and paste the whole thing here.",
         "cookie_text": "Cookie text:",
+        "cookies_list_btn": "📂 List Cookies",
         "admin_btn": "🛡️ Admin",
         "enter_password": "🔑 Enter admin password:",
         "wrong_password": "❌ Wrong password.",
@@ -155,6 +156,7 @@ LANG = {
         "guide_msg": "📱 <b>Cara menggunakan link HP</b>\n\n💻 <b>Android:</b>\n1. Bersihkan cache atau hapus data aplikasi Netflix\n2. Salin link yang dihasilkan\n3. Paste ke browser default\n4. Login Netflix secara otomatis\n\n📱 <b>iPhone / iPad:</b>\n1. Logout dari akun Netflix sebelumnya\n2. Salin link yang dihasilkan\n3. Paste ke browser default\n4. Login ke aplikasi Netflix secara otomatis",
         "format_msg": "<b>Format Netscape (.txt):</b>\n<code>.netflix.com\tTRUE\t/\tTRUE\t0\tNetflixId\tyourNetflixIdHere\n.netflix.com\tTRUE\t/\tTRUE\t0\tSecureNetflixId\tyourSecureIdHere</code>\n\n<b>Format JSON:</b>\n<code>[{\"domain\":\".netflix.com\",\"name\":\"NetflixId\",\"value\":\"xxx\"}]</code>\n\nCukup salin dan paste di sini.",
         "cookie_text": "Teks Cookie:",
+        "cookies_list_btn": "📂 List Cookies",
         "admin_btn": "🛡️ Admin",
         "enter_password": "🔑 Masukkan password admin:",
         "wrong_password": "❌ Password salah.",
@@ -592,11 +594,12 @@ def handle_message(msg):
         user_lang[chat_id] = new_lang
         add_user(chat_id)
         send_message(chat_id, t(chat_id, "language_set"), keyboard=[
+            [t(chat_id, "cookies_list_btn")],
             [t(chat_id, "get_netflix_btn")],
-            [t(chat_id, "paste_cookie_btn")],
-            [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
-            [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
-            [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+                        [t(chat_id, "paste_cookie_btn")],
+                        [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+                        [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+                        [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
         ])
         return
 
@@ -607,11 +610,12 @@ def handle_message(msg):
         send_message(
             chat_id, t(chat_id, "start_msg"), parse_mode="HTML",
             keyboard=[
+                [t(chat_id, "cookies_list_btn")],
                 [t(chat_id, "get_netflix_btn")],
-                [t(chat_id, "paste_cookie_btn")],
-                [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
-                [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
-                [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+                            [t(chat_id, "paste_cookie_btn")],
+                            [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+                            [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+                            [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
             ],
         )
         return
@@ -730,11 +734,12 @@ def handle_message(msg):
     if text == t(chat_id, "admin_main_menu_btn"):
         send_message(chat_id, t(chat_id, "start_msg"), parse_mode="HTML",
                      keyboard=[
+                         [t(chat_id, "cookies_list_btn")],
                          [t(chat_id, "get_netflix_btn")],
-                         [t(chat_id, "paste_cookie_btn")],
-                         [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
-                         [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
-                         [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
+                                     [t(chat_id, "paste_cookie_btn")],
+                                     [t(chat_id, "help_btn"), t(chat_id, "about_btn")],
+                                     [t(chat_id, "format_btn"), t(chat_id, "guide_btn")],
+                                     [t(chat_id, "lang_btn"), t(chat_id, "admin_btn")],
                      ])
         return
 
@@ -789,6 +794,21 @@ def handle_message(msg):
     if text == t(chat_id, "format_btn"):
         send_message(chat_id, t(chat_id, "format_msg"), parse_mode="HTML",
                      keyboard=[[t(chat_id, "menu")]])
+        return
+
+    if text == "/cookies" or text == t(chat_id, "cookies_list_btn"):
+        add_user(chat_id)
+        cookie_files = get_sorted_cookie_files()
+        if not cookie_files:
+            send_message(chat_id, "📂 <b>Folder cookies kosong.</b>\n\nKirim cookie .txt atau klik 📋 Saya paste cookie sendiri.")
+            return
+        total = len(cookie_files)
+        list_text = f"📂 <b>Daftar Cookies ({total})</b>\n\n"
+        for i, f in enumerate(cookie_files[:20], 1):
+            list_text += f"{i}. {f}\n"
+        if total > 20:
+            list_text += f"\n...dan {total - 20} lagi"
+        send_message(chat_id, list_text, parse_mode="HTML", keyboard=[[t(chat_id, "menu")]])
         return
 
     if text.startswith("/"):
