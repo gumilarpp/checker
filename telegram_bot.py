@@ -452,12 +452,6 @@ def get_random_cookie_and_check(cookie_type=None):
                 logger.warning(f"Failed to delete dead cookie {cookie_file}: {e}")
             continue
 
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except Exception as e:
-            logger.warning(f"Failed to remove used cookie {cookie_file}: {e}")
-
         return result
 
 def save_cookie_to_file(cookie_text, chat_id):
