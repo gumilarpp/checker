@@ -593,10 +593,6 @@ def handle_document(msg):
         send_message(chat_id, "❌ Kirim file .txt saja, ya.")
         return
 
-    if "cookie" not in file_name.lower() and "netflix" not in file_name.lower():
-        send_message(chat_id, "⚠️ Pastikan file berisi cookie Netflix.")
-        return
-
     try:
         # Get file path from Telegram
         resp = requests.get(
