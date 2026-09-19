@@ -402,6 +402,7 @@ def check_single_cookie(cookie_text):
     links = build_nftoken_links(nftoken_data["token"], "both")
     mobile_link = next((url for label, url in links if "Phone" in label), None)
     pc_link = next((url for label, url in links if "PC" in label), None)
+    tv_link = next((url for label, url in links if "TV" in label), None)
 
     return {
         "ok": True,
@@ -409,6 +410,7 @@ def check_single_cookie(cookie_text):
         "country": country,
         "mobile_link": mobile_link,
         "pc_link": pc_link,
+        "tv_link": tv_link,
         "expires": nftoken_data.get("expires_at_utc"),
     }
 
@@ -499,10 +501,11 @@ def process_cookie_async(chat_id, text, user):
     country = full_country_name(result_data.get("country"))
     mobile_link = result_data.get("mobile_link")
     pc_link = result_data.get("pc_link")
+    tv_link = result_data.get("tv_link")
 
     logout_warning = "\n\n⚠️ Jangan logout akun setelah masuk, logout akan membuat cookie mati untuk orang lain"
 
-    if mobile_link or pc_link:
+    if mobile_link or pc_link or tv_link:
         msg_text = (
             f"{t(chat_id, 'alive')}\n"
             f"{t(chat_id, 'plan')}: {plan}\n"
@@ -513,6 +516,8 @@ def process_cookie_async(chat_id, text, user):
         if mobile_link:
             msg_text += f'\n📱 Mobile Login: <a href="{mobile_link}">Klik untuk Login</a>'
             msg_text += '\n⚠️ iOS: Link tidak bisa dibuka di Telegram. Salin dan buka di Safari.'
+        if tv_link:
+            msg_text += f'\n📺 TV Login: <a href="{tv_link}">Klik untuk Login</a>'
         msg_text += logout_warning
         expiry_kh = format_expiry_cambodia(result_data.get("expires"))
         if expiry_kh:
@@ -558,10 +563,11 @@ def process_get_netflix_async(chat_id):
     country = full_country_name(result_data.get("country"))
     mobile_link = result_data.get("mobile_link")
     pc_link = result_data.get("pc_link")
+    tv_link = result_data.get("tv_link")
 
     logout_warning = "\n\n⚠️ Jangan logout akun setelah masuk, logout akan membuat cookie mati untuk orang lain"
 
-    if mobile_link or pc_link:
+    if mobile_link or pc_link or tv_link:
         msg_text = (
             f"{t(chat_id, 'alive')}\n"
             f"{t(chat_id, 'plan')}: {plan}\n"
@@ -572,6 +578,8 @@ def process_get_netflix_async(chat_id):
         if mobile_link:
             msg_text += f'\n📱 Mobile Login: <a href="{mobile_link}">Klik untuk Login</a>'
             msg_text += '\n⚠️ iOS: Link tidak bisa dibuka di Telegram. Salin dan buka di Safari.'
+        if tv_link:
+            msg_text += f'\n📺 TV Login: <a href="{tv_link}">Klik untuk Login</a>'
         msg_text += logout_warning
         expiry_kh = format_expiry_cambodia(result_data.get("expires"))
         if expiry_kh:

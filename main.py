@@ -1989,13 +1989,15 @@ def build_nftoken_links(token, mode):
     if not normalized_token or normalized_mode == "false":
         return []
 
+    tv_link = f"https://netflix.com/tv2?nftoken={normalized_token}"
     if normalized_mode == "pc":
-        return [("🖥️ PC Login", f"https://netflix.com/?nftoken={normalized_token}")]
+        return [("🖥️ PC Login", f"https://netflix.com/?nftoken={normalized_token}"), ("📺 TV Login", tv_link)]
     if normalized_mode == "mobile":
-        return [("📱 Phone Login", f"https://netflix.com/unsupported?nftoken={normalized_token}")]
+        return [("📱 Phone Login", f"https://netflix.com/unsupported?nftoken={normalized_token}"), ("📺 TV Login", tv_link)]
     return [
         ("🖥️ PC Login", f"https://netflix.com/?nftoken={normalized_token}"),
         ("📱 Phone Login", f"https://netflix.com/unsupported?nftoken={normalized_token}"),
+        ("📺 TV Login", tv_link),
     ]
 
 
